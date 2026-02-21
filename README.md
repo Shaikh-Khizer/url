@@ -54,8 +54,8 @@ gcc -o url main.c
 ```
 ### Make Executable (Optional)
 ```bash
-chmod +x urltool
-sudo mv urltool /usr/local/bin/
+chmod +x url
+sudo cp url /usr/local/bin/
 ```
 
 ## 📄 License
