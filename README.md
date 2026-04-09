@@ -38,19 +38,15 @@ This tool supports multiple encoding formats, smart detection, repeated encoding
 
 ### 1️⃣ Requirements
 
-- GCC compiler
-- Standard C libraries (included with GCC)
-- Linux / macOS (Windows via MinGW)
+- python3
 
-Check GCC version:
+
+Check Python3 version:
 
 ```bash
-gcc --version
+python3 --version
 ```
 
-### compilation: 
-```bash
-gcc -o url main.c
 ```
 ### Make Executable (Optional)
 ```bash
