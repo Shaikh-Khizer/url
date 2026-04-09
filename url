@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""
+URL Encoder/Decoder Tool
+A versatile CLI tool for encoding, decoding, and analyzing URL-encoded strings.
+"""
+
+import sys
+import argparse
+import re
+from urllib.parse import quote, unquote, quote_plus, unquote_plus
+
+
+# ─── Encoding helpers ────────────────────────────────────────────────────────
+
+def encode_standard(text: str, uppercase: bool = False) -> str:
+    """Percent-encode everything except unreserved chars (RFC 3986)."""
+    result = quote(text, safe="")
+    return result.upper() if uppercase else result.lower()
+
+
+def encode_double(text: str, uppercase: bool = False) -> str:
+    """Double percent-encode (encode the % signs of an already-encoded string)."""
+    first = encode_standard(text, uppercase)
+    return encode_standard(first, uppercase)
+
+
+def encode_unicode(text: str, uppercase: bool = False) -> str:
+    """Encode non-ASCII characters as %uXXXX, ASCII as standard percent-encoding."""
+    result = []
+    for ch in text:
+        cp = ord(ch)
+        if cp > 127:
+            u = f"%u{cp:04X}"
+            result.append(u if uppercase else u.lower())
+        elif ch.isalnum() or ch in "-_.~":
+            result.append(ch)
+        else:
+            h = f"%{cp:02X}"
+            result.append(h if uppercase else h.lower())
+    return "".join(result)
+
+
+def encode_full(text: str, uppercase: bool = False) -> str:
+    """Encode every single character, including unreserved ones."""
+    result = []
+    for ch in text:
+        h = "".join(f"%{b:02X}" for b in ch.encode("utf-8"))
+        result.append(h if uppercase else h.lower())
+    return "".join(result)
+
+
+def encode_plus(text: str, uppercase: bool = False) -> str:
+    """application/x-www-form-urlencoded style (spaces → +)."""
+    result = quote_plus(text, safe="")
+    return result.upper() if uppercase else result.lower()
+
+
+# ─── Decoding helpers ─────────────────────────────────────────────────────────
+
+def decode_standard(text: str, times: int = 1) -> tuple[str, list[str]]:
+    """Standard percent-decode, optionally repeated N times."""
+    steps = [text]
+    current = text
+    for _ in range(times):
+        decoded = unquote(current, errors="replace")
+        if decoded == current:
+            break
+        steps.append(decoded)
+        current = decoded
+    return current, steps
+
+
+def decode_plus(text: str) -> str:
+    """Decode application/x-www-form-urlencoded (+ → space)."""
+    return unquote_plus(text, errors="replace")
+
+
+def decode_unicode(text: str) -> str:
+    """Decode %uXXXX sequences as well as standard %XX."""
+    text = re.sub(
+        r"%u([0-9a-fA-F]{4})",
+        lambda m: chr(int(m.group(1), 16)),
+        text,
+    )
+    return unquote(text, errors="replace")
+
+
+# ─── Smart / auto-detection ───────────────────────────────────────────────────
+
+def smart_decode(text: str, verbose: bool = False) -> str:
+    """
+    Detect encoding style and decode accordingly, iterating until stable.
+    Handles: %uXXXX, double-encoding, plus-encoding, standard.
+    """
+    steps = [f"Input: {text}"]
+    current = text
+    iteration = 0
+    max_iter = 10
+
+    while iteration < max_iter:
+        iteration += 1
+        prev = current
+
+        # %uXXXX unicode sequences
+        if re.search(r"%u[0-9a-fA-F]{4}", current, re.IGNORECASE):
+            current = decode_unicode(current)
+            steps.append(f"Step {iteration} (unicode %uXXXX): {current}")
+            continue
+
+        # double-encoded: %25XX
+        if re.search(r"%25[0-9a-fA-F]{2}", current, re.IGNORECASE):
+            current = unquote(current, errors="replace")
+            steps.append(f"Step {iteration} (double-encoded): {current}")
+            continue
+
+        # plus-encoded
+        if "+" in current and re.search(r"%[0-9a-fA-F]{2}", current):
+            current = unquote_plus(current, errors="replace")
+            steps.append(f"Step {iteration} (plus-encoded): {current}")
+            continue
+
+        # standard percent-encoding
+        if re.search(r"%[0-9a-fA-F]{2}", current, re.IGNORECASE):
+            current = unquote(current, errors="replace")
+            steps.append(f"Step {iteration} (standard): {current}")
+            continue
+
+        break  # nothing left to decode
+
+        if current == prev:
+            break
+
+    if verbose:
+        for s in steps:
+            print(s, file=sys.stderr)
+
+    return current
+
+
+# ─── Analysis ─────────────────────────────────────────────────────────────────
+
+def analyze(text: str) -> None:
+    has_standard   = bool(re.search(r"(?<!%)%[0-9a-fA-F]{2}", text, re.IGNORECASE))
+    has_double     = bool(re.search(r"%25[0-9a-fA-F]{2}", text, re.IGNORECASE))
+    has_unicode    = bool(re.search(r"%u[0-9a-fA-F]{4}", text, re.IGNORECASE))
+    has_plus       = "+" in text
+    has_raw_unsafe = bool(re.search(r'[ <>"{}|\\^`\[\]]', text))
+    encoding_pct   = len(re.findall(r"%[0-9a-fA-F]{2}", text, re.IGNORECASE))
+    total_chars    = len(text)
+
+    # analysis report always goes to stderr so piping still works
+    sink = sys.stderr if not sys.stdout.isatty() else sys.stdout
+    print("── Analysis ──────────────────────────────────────", file=sink)
+    print(f"  Input length      : {total_chars} characters", file=sink)
+    print(f"  Percent sequences : {encoding_pct}", file=sink)
+    print(f"  Standard encoding : {'yes' if has_standard else 'no'}", file=sink)
+    print(f"  Double encoding   : {'yes ⚠' if has_double else 'no'}", file=sink)
+    print(f"  Unicode (%uXXXX)  : {'yes' if has_unicode else 'no'}", file=sink)
+    print(f"  Plus encoding     : {'yes' if has_plus else 'no'}", file=sink)
+    print(f"  Raw unsafe chars  : {'yes ⚠' if has_raw_unsafe else 'no'}", file=sink)
+
+    # guess primary type
+    types = []
+    if has_double:   types.append("double")
+    if has_unicode:  types.append("unicode")
+    if has_standard: types.append("standard")
+    if has_plus:     types.append("plus/form")
+    print(f"  Detected type(s)  : {', '.join(types) if types else 'none / plain text'}", file=sink)
+    print("──────────────────────────────────────────────────", file=sink)
+
+    # decoded result: raw on pipe, labelled on tty
+    if types:
+        decoded = smart_decode(text)
+        out(decoded, "  Smart-decoded")
+
+
+# ─── Encode dispatcher ────────────────────────────────────────────────────────
+
+ENCODERS = {
+    "standard": encode_standard,
+    "double":   encode_double,
+    "unicode":  encode_unicode,
+    "full":     encode_full,
+    "plus":     encode_plus,
+}
+
+def is_tty() -> bool:
+    """Return True only when stdout is an interactive terminal."""
+    return sys.stdout.isatty()
+
+
+def out(plain: str, label: str) -> None:
+    """
+    Print output respecting pipe/redirect context.
+    - TTY  → pretty label on stdout  (e.g. "Encoded (standard x1, lowercase): %3c")
+    - Pipe → raw value only on stdout (e.g. "%3c")
+    Verbose/step details always go to stderr so they never pollute the pipe.
+    """
+    if is_tty():
+        print(f"{label}: {plain}")
+    else:
+        print(plain)
+
+
+def do_encode(text: str, enc_type: str, times: int, uppercase: bool, verbose: bool) -> None:
+    types = list(ENCODERS.keys()) if enc_type == "all" else [enc_type]
+
+    for t in types:
+        fn = ENCODERS[t]
+        current = text
+        steps = [text]
+        for _ in range(times):
+            current = fn(current, uppercase)
+            steps.append(current)
+
+        label = f"Encoded ({t} x{times}, {'upper' if uppercase else 'lower'}case)"
+        if enc_type == "all":
+            # In 'all' mode always show type prefix so output is meaningful
+            print(f"[{t:10s}] {current}")
+        else:
+            out(current, label)
+
+        if verbose:
+            for i, s in enumerate(steps):
+                print(f"  step {i}: {s}", file=sys.stderr)
+
+
+# ─── Decode dispatcher ────────────────────────────────────────────────────────
+
+def do_decode(text: str, times: int, verbose: bool) -> None:
+    result, steps = decode_standard(text, times)
+    actual_steps = len(steps) - 1
+    out(result, f"Decoded (x{actual_steps})")
+    if verbose:
+        for i, s in enumerate(steps):
+            print(f"  step {i}: {s}", file=sys.stderr)
+
+
+# ─── stdin handling ───────────────────────────────────────────────────────────
+
+def read_stdin() -> str:
+    """Read all of stdin, stripping the trailing newline if present."""
+    data = sys.stdin.read()
+    # Strip exactly one trailing newline (mirrors shell echo behaviour)
+    if data.endswith("\n"):
+        data = data[:-1]
+    return data
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="url",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "URL Encoder/Decoder Tool\n"
+            "========================"
+        ),
+        add_help=False,
+    )
+
+    g = p.add_argument_group("Options")
+    g.add_argument("-e", "--encode",   metavar="TEXT", nargs="?", const=None,
+                   help="Text to encode (omit TEXT to read from stdin)")
+    g.add_argument("-d", "--decode",   metavar="TEXT", nargs="?", const=None,
+                   help="Text to decode (omit TEXT to read from stdin)")
+    g.add_argument("-s", "--smart",    metavar="TEXT", nargs="?", const=None,
+                   help="Smart decode with auto-detection")
+    g.add_argument("-a", "--analyze",  metavar="TEXT", nargs="?", const=None,
+                   help="Analyze encoding of text")
+    g.add_argument("-t", "--type",     metavar="TYPE", default="standard",
+                   choices=["standard", "double", "unicode", "full", "plus", "all"],
+                   help="Encoding type: standard, double, unicode, full, plus, all")
+    g.add_argument("--times",          metavar="N", type=int, default=1,
+                   help="Number of times to encode/decode")
+    g.add_argument("-u", "--uppercase", action="store_true",
+                   help="Use uppercase hex letters (default: lowercase)")
+    g.add_argument("-v", "--verbose",  action="store_true",
+                   help="Verbose output showing steps")
+    g.add_argument("-h", "--help",     action="help",
+                   help="Show this help message")
+    return p
+
+
+def resolve_text(value, flag_name: str) -> str:
+    """
+    If the user supplied a value on the CLI, return it.
+    If they used the flag with no value (const=None), read stdin.
+    Raise a clear error if stdin is a tty and no text was given.
+    """
+    if value is not None:
+        return value
+    # flag present but no TEXT → stdin
+    if not sys.stdin.isatty():
+        return read_stdin()
+    print(f"error: -{flag_name} requires TEXT or piped stdin input.", file=sys.stderr)
+    sys.exit(1)
+
+
+def main() -> None:
+    parser = build_parser()
+
+    # Special case: bare invocation with no args
+    if len(sys.argv) == 1:
+        # Try stdin; if nothing, print help
+        if not sys.stdin.isatty():
+            text = read_stdin()
+            do_encode(text, "standard", 1, False, False)
+            return
+        parser.print_help()
+        return
+
+    args = parser.parse_args()
+
+    if args.times < 1:
+        print("error: --times must be ≥ 1", file=sys.stderr)
+        sys.exit(1)
+
+    # ── encode ──
+    if args.encode is not None or (len(sys.argv) > 1 and "-e" in sys.argv or "--encode" in sys.argv):
+        if args.encode is None and not sys.stdin.isatty():
+            text = read_stdin()
+        elif args.encode is None:
+            print("error: -e/--encode requires TEXT or piped stdin input.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            text = args.encode
+        do_encode(text, args.type, args.times, args.uppercase, args.verbose)
+        return
+
+    # ── decode ──
+    if args.decode is not None or (len(sys.argv) > 1 and ("-d" in sys.argv or "--decode" in sys.argv)):
+        if args.decode is None and not sys.stdin.isatty():
+            text = read_stdin()
+        elif args.decode is None:
+            print("error: -d/--decode requires TEXT or piped stdin input.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            text = args.decode
+        do_decode(text, args.times, args.verbose)
+        return
+
+    # ── smart ──
+    if args.smart is not None or (len(sys.argv) > 1 and ("-s" in sys.argv or "--smart" in sys.argv)):
+        if args.smart is None and not sys.stdin.isatty():
+            text = read_stdin()
+        elif args.smart is None:
+            print("error: -s/--smart requires TEXT or piped stdin input.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            text = args.smart
+        result = smart_decode(text, verbose=args.verbose)
+        out(result, "Smart-decoded")
+        return
+
+    # ── analyze ──
+    if args.analyze is not None or (len(sys.argv) > 1 and ("-a" in sys.argv or "--analyze" in sys.argv)):
+        if args.analyze is None and not sys.stdin.isatty():
+            text = read_stdin()
+        elif args.analyze is None:
+            print("error: -a/--analyze requires TEXT or piped stdin input.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            text = args.analyze
+        analyze(text)
+        return
+
+    # ── fallback: pipe with no explicit flag defaults to encode ──
+    if not sys.stdin.isatty():
+        text = read_stdin()
+        do_encode(text, args.type, args.times, args.uppercase, args.verbose)
+        return
+
+    parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
