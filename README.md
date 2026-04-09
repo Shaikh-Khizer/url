@@ -47,7 +47,7 @@ Check Python3 version:
 python3 --version
 ```
 
-```
+
 ### Make Executable (Optional)
 ```bash
 chmod +x url
